@@ -1,9 +1,14 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <RTClib.h>
 
+RTC_DS1307 RTC;
 LiquidCrystal_I2C lcd(0x3F, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
 
-byte solar[8] = //icon for solar panel
+int PWM_PIN = 5;
+int LOAD_PIN = 8;
+
+byte rotor[8] = //icon for rotor
 {
   0b11111,0b10101,0b11111,0b10101,0b11111,0b10101,0b11111,0b00000
 };
@@ -12,17 +17,9 @@ byte battery[8] =  //icon for battery
   0b01110,0b11011,0b10001,0b10001,0b10001,0b10001,0b10001,0b11111
 };
 
-byte energy[8] =  // icon for power
+byte load[8] =  // icon for power
 {
   0b00010,0b00100,0b01000,0b11111,0b00010,0b00100,0b01000,0b00000
-};
-byte alarm[8] =  // icon for alarm
-{
- 0b00000,0b00100,0b01110,0b01110,0b01110,0b11111,0b00000,0b00100
-};
-byte temp[8] = //icon for termometer
-{
- 0b00100,0b01010,0b01010,0b01110,0b01110,0b11111,0b11111,0b01110
 };
 
 byte charge[8] = // icon for battery charge
@@ -34,44 +31,54 @@ byte not_charge[8]=
   0b00000,0b10001,0b01010,0b00100,0b01010,0b10001,0b00000,0b00000,
 };
 
-const int numReadings = 10;
-
-int rotorCurrentReadings[numReadings];      // the readings from the analog input
-int rotorCurrentIndex = 0;                  // the index of the current reading
-int rotorCurrentTotal = 0;                  // the running total
-int rotorCurrentAverage = 0;                // the average
-
+const int numReadings = 50;
+//Rotor Current Reading Variables
+int rotorCurrentReadings[numReadings];
+int rotorCurrentIndex = 0;
+int rotorCurrentTotal = 0.0;
+float rotorCurrentAverage = 0.0;
 int rotorCurrentInputPin = A0;
-float rawVoltage = 0.0;
-int acoffset = 2500;
-int mvPerAmp = 185;
-float rotorActualCurrent = 0.0;
 
 
-float rotorVoltageReadings[numReadings];      // the readings from the analog input
-int rotorVoltageIndex = 0;                  // the index of the current reading
-float rotorVoltageTotal = 0;                  // the running total
-float rotorVoltageAverage = 0;                // the average
-
-float rotorVoltageInputPin = A1;
+//Rotor Voltage Reading Variables
+int rotorVoltageReadings[numReadings];
+int rotorVoltageIndex = 0;
+int rotorVoltageTotal = 0;
+int rotorVoltageAverage = 0;
+int rotorVoltageInputPin = A1;
 float pinVoltage = 0.0;
 float rotorActual = 0.0;
 
-int battVoltageReadings[numReadings];      // the readings from the analog input
-int battVoltageIndex = 0;                  // the index of the current reading
-int battVoltageTotal = 0;                  // the running total
-int battVoltageAverage = 0;                // the average
 
+//Battery Voltage Reading Variables
+int battVoltageReadings[numReadings];
+int battVoltageIndex = 0;
+int battVoltageTotal = 0;
+int battVoltageAverage = 0;
 int battVoltageInputPin = A2;
 float battPinVoltage = 0.0;
 float battActual = 0.0;
 
-int battCurrentReadings[numReadings];      // the readings from the analog input
-int battCurrentIndex = 0;                  // the index of the current reading
-int battCurrentTotal = 0;                  // the running total
-int battCurrentAverage = 0;                // the average
 
+//Battery Current Reading Variables
+int battCurrentReadings[numReadings];
+int battCurrentIndex = 0;
+int battCurrentTotal = 0;
+float battCurrentAverage = 0;
 int battCurrentInputPin = A3;
+
+//State of Charge
+const float battFull = 12.7;
+const float battEmpty = 10.5;
+int battCharge = 0;
+const float battCap = 100.0;
+float chargingTime = 0.0;
+int duty = 0;
+float battEnergy = 0.0;
+
+//Load Variables
+float loadPower = 0.0;
+float loadEnergy = 0.0;
 
 void setup()
 {
@@ -84,25 +91,55 @@ void setup()
     battVoltageReadings[thisReading] = 0;
     battCurrentReadings[thisReading] = 0; 
   }
+
+  //initialize LCD
   lcd.begin(20,4);   // initialize the lcd for 16 chars 2 lines, turn on backlight
   lcd.backlight(); // finish with backlight on  
-  lcd.createChar(1,solar);
-  lcd.createChar(2, battery);
-  lcd.createChar(3, energy);
-  lcd.createChar(4,alarm);
-  lcd.createChar(5,temp);
-  lcd.createChar(6,charge);
-  lcd.createChar(7,not_charge);
-  lcd.clear();  
+  lcd.createChar(1,rotor);
+  lcd.createChar(2,battery);
+  lcd.createChar(3,charge);
+  lcd.createChar(4,load);
+  lcd.createChar(5,not_charge);
+  lcd.clear();
+
+  //initialize Wire
+  Wire.begin();
+
+  //initialize RTC
+  RTC.begin();
+
+  //pinModes
+  pinMode(LOAD_PIN, OUTPUT); 
 }
 
 void loop() {
+  //Get Current DateTime
+  DateTime now = RTC.now();
+  int timeHour = (now.hour(), DEC);
+  int timeMin = (now.minute(), DEC);
+
   rotorVoltageRead();
   rotorCurrentRead();
   battVoltageRead();
   battCurrentRead();
+  computeData();
   printLCD();
+  loadControl(timeMin, timeHour);
+  Serial.print("RV: ");
+  Serial.print(rotorActual);
+  Serial.print("\tRC: ");
+  Serial.print(rotorCurrentAverage);
+  Serial.print("\tBV: ");
+  Serial.print(battActual);
+  Serial.print("\tBC: ");
+  Serial.print(battCurrentAverage);
+  delay(200);
 }
+
+/*Smoothing algorithm are applied on all sensor reading functions
+Data Sampling Frequency = 5 Hz
+Time Interval (delay) = 200 ms
+*/
 
 void rotorVoltageRead()
 {
@@ -127,8 +164,8 @@ void rotorVoltageRead()
   rotorActual = (pinVoltage * 23.3) / 3.3;
     
   // send it to the computer as ASCII digits
-  Serial.println(rotorActual);
-  delay(1);        // delay in between reads for stability  
+ // Serial.println(rotorActual);
+//  delay(1);        // delay in between reads for stability  
 }
 
 void rotorCurrentRead()
@@ -136,7 +173,7 @@ void rotorCurrentRead()
   rotorCurrentTotal= rotorCurrentTotal - rotorCurrentReadings[rotorCurrentIndex];        
   // read from the sensor:  
   rotorCurrentReadings[rotorCurrentIndex] = analogRead(rotorCurrentInputPin);
-  // add the reading to the total:
+  //rotorCurrentReadings[rotorCurrentIndex] = (rotorCurrentReadings[rotorCurrentIndex] * 5/1024.0 - 2.5)/.185; // add the reading to the total:
   rotorCurrentTotal= rotorCurrentTotal + rotorCurrentReadings[rotorCurrentIndex];      
   // advance to the next position in the array:  
   rotorCurrentIndex = rotorCurrentIndex + 1;                    
@@ -145,14 +182,13 @@ void rotorCurrentRead()
   if (rotorCurrentIndex >= numReadings)              
     // ...wrap around to the beginning:
     rotorCurrentIndex = 0;                          
-
+  //Serial.println(rotorCurrentAverage);
   // calculate the average:
   rotorCurrentAverage = rotorCurrentTotal / numReadings;
-  rawVoltage = (rotorCurrentAverage / 1024.0) * 5000;
-  rotorActualCurrent = ((rawVoltage - acoffset) / mvPerAmp);
-
-  Serial.println(rotorActualCurrent);
-  delay(1);
+  rotorCurrentAverage = rotorCurrentAverage - 509;
+  rotorCurrentAverage = rotorCurrentAverage * 5 / 1024;
+  rotorCurrentAverage = rotorCurrentAverage / 0.1;
+//  delay(200);
 
 }
 
@@ -162,8 +198,7 @@ void battCurrentRead()
   battCurrentTotal= battCurrentTotal - battCurrentReadings[battCurrentIndex];        
   // read from the sensor:  
   battCurrentReadings[battCurrentIndex] = analogRead(battCurrentInputPin);
-  //Data processing:510-raw data from analogRead when the input is 0; 5-5v; the first 0.04-0.04V/A(sensitivity); the second 0.04-offset val;
-  battCurrentReadings[battCurrentIndex] = (battCurrentReadings[battCurrentIndex]-510)*5/1024/0.04-0.04;
+
   // add the reading to the total:
   battCurrentTotal= battCurrentTotal + battCurrentReadings[battCurrentIndex];      
   // advance to the next position in the array:  
@@ -175,10 +210,13 @@ void battCurrentRead()
     battCurrentIndex = 0;                          
 
   // calculate the average:
-  battCurrentAverage = battCurrentTotal / numReadings;        
+  battCurrentAverage = battCurrentTotal / numReadings;
+  battCurrentAverage = battCurrentAverage - 511;
+  battCurrentAverage = battCurrentAverage * 5 / 1024;
+  battCurrentAverage = battCurrentAverage / 0.04;        
   // send it to the computer as ASCII digits
-  Serial.println(battCurrentAverage);  
-  delay(1);        // delay in between reads for stability  
+  //Serial.println(battCurrentAverage);  
+ // delay(200);        // delay in between reads for stability  
 }
 
 void battVoltageRead()
@@ -205,8 +243,38 @@ void battVoltageRead()
     
   // send it to the computer as ASCII digits
   Serial.println(battActual);
-  delay(1);        // delay in between reads for stability  
+ // delay(200);        // delay in between reads for stability  
 }
+
+void computeData()
+{
+  battCharge = ((battActual - battEmpty) / (battFull - battEmpty)) * 100;
+  loadPower = battActual * battCurrentAverage;
+  float currCap = battCap * (100 - battCharge); //current capacity of battery
+  chargingTime = currCap / rotorCurrentAverage;
+  battEnergy = battActual * (battCap * battCharge);
+  
+  if (battCharge >= 80)
+  {
+    duty= 76;
+    analogWrite(PWM_PIN,duty);
+  }
+  
+  else
+  {
+   duty=0;
+   analogWrite(PWM_PIN,duty);
+  }
+}
+
+void loadControl(int timeMin, int timeHour)
+{
+  if (timeMin == 30 && timeHour == 17)
+    digitalWrite(LOAD_PIN, HIGH);
+  else if (timeHour == 6 && timeMin < 1)
+    digitalWrite(LOAD_PIN, LOW);
+}
+
 void printLCD()
 {
   //1st line
@@ -216,32 +284,36 @@ void printLCD()
   lcd.print(rotorActual);
   lcd.setCursor(7,0);
   lcd.print("V/");
-  lcd.setCursor(10, 0);
-  lcd.print(rotorActualCurrent);
-  lcd.setCursor(15, 0);
-  lcd.print("A");
   
   //2nd line
   lcd.setCursor(0, 1);
   lcd.write(2);
   lcd.setCursor(2, 1);
-  lcd.print(battActual);
+  lcd.print(battEnergy);
   lcd.setCursor(7,1);
-  lcd.print("V/");
+  lcd.print("Wh/");
   lcd.setCursor(10, 1);
-  lcd.print(battCurrentAverage);
-  lcd.setCursor(15, 1);
-  lcd.print("A");
+  lcd.print(battCharge);
+  lcd.setCursor(13, 1);
+  lcd.print("%");
   
   //3rd line
   lcd.setCursor(0, 2);
   lcd.write(3);
   lcd.setCursor(2, 2);
-  lcd.print("100Ah/98%");
+  lcd.print(loadPower);
+  lcd.setCursor(6, 2);
+  lcd.print("W");
+
+  //4th Line
   lcd.setCursor(0, 3);
-  lcd.write(6);
+  lcd.write(4);
   lcd.setCursor(2, 3);
-  lcd.print("CHARGING...");
-//  lcd.setCursor(12, 0);
-//  lcd.write(7);
+  lcd.print(rotorCurrentAverage);
+  lcd.setCursor(7, 3);
+  lcd.print("A/");
+  lcd.setCursor(9, 3);
+  lcd.print(chargingTime);
+  lcd.setCursor(17, 3);
+  lcd.print("HRS");
 }
